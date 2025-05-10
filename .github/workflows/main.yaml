@@ -1,0 +1,60 @@
+name: vprofile actions
+
+# Trigger this workflow manually
+on: workflow_dispatch
+
+# Environment variables
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: vprofileapp
+  EKS_CLUSTER: vprofile-eks
+
+jobs:
+  Testing:
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout the source code from the repository
+      - name: Code checkout
+        uses: actions/checkout@v4
+
+      # Run unit tests using Maven
+      - name: Maven test
+        run: mvn test
+
+      # Run Checkstyle to check Java code formatting and conventions
+      - name: Checkstyle
+        run: mvn checkstyle:checkstyle
+
+      # Set up Java 11 (required for sonar-scanner v5+)
+      - name: Set Java 11
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin' # Java distribution
+          java-version: '11'
+
+      # Install and configure SonarQube scanner
+      - name: Setup SonarQube
+        uses: warchant/setup-sonar-scanner@v7
+
+      # Run the SonarQube scan with project-specific configuration
+      - name: SonarQube Scan
+        run: |
+          sonar-scanner \
+            -Dsonar.host.url=${{ secrets.SONAR_URL }} \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }} \
+            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }} \
+            -Dsonar.projectKey=${{ secrets.SONAR_PROJECT_KEY }} \
+            -Dsonar.sources=src/ \
+            -Dsonar.junit.reportsPath=target/surefire-reports/ \
+            -Dsonar.jacoco.reportsPath=target/jacoco.exec \
+            -Dsonar.java.checkstyle.reportPaths=target/checkstyle-result.xml \
+            -Dsonar.java.binaries=target/test-classes/com/visualpathit/account/controllerTest/
+
+      # Check the status of the SonarQube Quality Gate
+      - name: SonarQube Quality Gate check
+        id: sonarqube-quality-gate-check
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5 # Fail this step if it exceeds 5 minutes
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_URL }} # Optional

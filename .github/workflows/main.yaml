@@ -1,42 +1,42 @@
 name: vprofile actions
 
-# Trigger this workflow manually
+# This workflow is triggered manually via the GitHub UI
 on: workflow_dispatch
 
-# Environment variables
+# Global environment variables
 env:
-  AWS_REGION: us-east-1
-  ECR_REPOSITORY: vprofileapp
-  EKS_CLUSTER: vprofile-eks
+  AWS_REGION: us-east-1                   # AWS region for deploying to ECR and EKS
+  ECR_REPOSITORY: vprofileapp            # ECR repository name
+  EKS_CLUSTER: vprofile-eks              # Name of the EKS cluster
 
 jobs:
   Testing:
     runs-on: ubuntu-latest
     steps:
-      # Checkout the source code from the repository
+      # Step 1: Checkout the source code from the repository
       - name: Code checkout
         uses: actions/checkout@v4
 
-      # Run unit tests using Maven
+      # Step 2: Run unit tests using Maven
       - name: Maven test
         run: mvn test
 
-      # Run Checkstyle to check Java code formatting and conventions
+      # Step 3: Check Java code style and conventions using Checkstyle
       - name: Checkstyle
         run: mvn checkstyle:checkstyle
 
-      # Set up Java 11 (required for sonar-scanner v5+)
+      # Step 4: Set up Java 11 runtime (required by sonar-scanner v5+)
       - name: Set Java 11
         uses: actions/setup-java@v3
         with:
-          distribution: 'temurin' # Java distribution
+          distribution: 'temurin'        # Using Eclipse Temurin distribution
           java-version: '11'
 
-      # Install and configure SonarQube scanner
+      # Step 5: Install and configure the SonarQube Scanner CLI tool
       - name: Setup SonarQube
         uses: warchant/setup-sonar-scanner@v7
 
-      # Run the SonarQube scan with project-specific configuration
+      # Step 6: Run the static code analysis using SonarQube
       - name: SonarQube Scan
         run: |
           sonar-scanner \
@@ -50,22 +50,24 @@ jobs:
             -Dsonar.java.checkstyle.reportPaths=target/checkstyle-result.xml \
             -Dsonar.java.binaries=target/test-classes/com/visualpathit/account/controllerTest/
 
-      # Check the status of the SonarQube Quality Gate
+      # Step 7: Check the status of the SonarQube Quality Gate
       - name: SonarQube Quality Gate check
         id: sonarqube-quality-gate-check
         uses: sonarsource/sonarqube-quality-gate-action@master
-        timeout-minutes: 5 # Fail this step if it exceeds 5 minutes
+        timeout-minutes: 5                # Fail this step if it takes longer than 5 minutes
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_URL }} # Optional
+          SONAR_HOST_URL: ${{ secrets.SONAR_URL }} # Optional but recommended
 
   BUILD_AND_PUBLISH:
-    needs: Testing
+    needs: Testing                        # This job runs only after the Testing job completes
     runs-on: ubuntu-latest
     steps:
+      # Step 1: Checkout the source code again (needed in every job)
       - name: Code checkout
         uses: actions/checkout@v4
 
+      # Step 2: Build Docker image and push to AWS ECR
       - name: Build & Upload image to ECR
         uses: appleboy/docker-ecr-action@master
         with:
@@ -74,6 +76,50 @@ jobs:
           registry: ${{ secrets.REGISTRY }}
           repo: ${{ env.ECR_REPOSITORY }}
           region: ${{ env.AWS_REGION }}
-          tags: latest,${{ github.run_number }}
+          tags: latest,${{ github.run_number }}  # Use both "latest" and the GitHub run number as tags
           dockerfile: ./Dockerfile
-          context: ./
+          context: ./                           # Directory to use for Docker build context
+
+  DeployToEKS:
+    needs: BUILD_AND_PUBLISH                  # This job depends on the image being built and pushed
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Checkout source code
+      - name: Code checkout
+        uses: actions/checkout@v4
+
+      # Step 2: Configure AWS credentials in the GitHub Actions environment
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Step 3: Update local kubeconfig to connect to the EKS cluster
+      - name: Get kube config file
+        run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER }} --region ${{ env.AWS_REGION }}
+
+      # Step 4: Optional debug step to print kubeconfig (can be removed in production)
+      - name: Print config file
+        run: |
+          echo "Config file content:"
+          cat ~/.kube/config
+
+      # Step 5: Create Kubernetes secret to allow pulling images from ECR
+      - name: Login to ECR
+        run: kubectl create secret docker-registry regcred --docker-server=${{ secrets.REGISTRY }} --docker-username=AWS --docker-password=$(aws ecr get-login-password)
+
+      # Step 6: Deploy the application to the EKS cluster using Helm
+      - name: Deploy Helm
+        uses: bitovi/github-actions-deploy-eks-helm@v1.2.8
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          cluster-name: ${{ env.EKS_CLUSTER }}
+          # config-files: .github/values/dev.yaml # Optional: pass a values file if needed
+          chart-path: helm/vprofilecharts         # Path to Helm chart
+          namespace: default
+          values: appimage=${{ secrets.REGISTRY }}/${{ env.ECR_REPOSITORY }},apptag=${{ github.run_number }}
+          name: vprofile-stack                    # Release name in Helm
